@@ -217,6 +217,7 @@ def webhook():
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 def handle_callback(callback_query):
+    print(f"[DEBUG] Callback received: {callback_query}")
     query_id = callback_query["id"]
     user_id = callback_query["from"]["id"]
     chat_id = callback_query["message"]["chat"]["id"]
