@@ -1,0 +1,23 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables and secrets
+.env
+.flaskenv
+
+# LibSQL / SQLite local database files (if you download or use local DBs)
+*.db
+*.sqlite
+*.sqlite3
+
+# Operating System files
+.DS_Store
+Thumbs.db

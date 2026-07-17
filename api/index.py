@@ -2,47 +2,25 @@ import os
 import requests
 from flask import Flask, request, jsonify
 
+import db
+
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL_ID_1 = int(os.environ["CHANNEL_ID_1"])
 CHANNEL_ID_2 = int(os.environ["CHANNEL_ID_2"])
+ADMIN_ID = int(os.environ["ADMIN_ID"])  # your Telegram user id — for /addfile & /delfile
 
 BOT_USERNAME = "smartanikin_bot"            # ← replace, without @
 CHANNEL_1_LINK = "https://t.me/aakashio"  # ← replace
 CHANNEL_2_LINK = "https://t.me/+Auw6rKRx3Q1lZmE1"  # ← replace
-CHANNEL_1_NAME = "The Legend of Hei 1 & 2"
-CHANNEL_2_NAME = "Anime"
+CHANNEL_1_NAME = "Videoes"
+CHANNEL_2_NAME = "Wallpaper"
 
 BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Each file has a name, file_id, and an emoji icon
-FILE_INDEX = {
-    "wallpaper": {
-        "label": "🖼 Wallpaper (@wallandiadesk)",
-        "file_id": "BQACAgUAAyEFAAThvr8XAAMUae80odT4KXW_OImhRMsHwteK0U8AAj0hAALOnHlXjqQUCa-SuPE7BA"
-    },
-    "hei1": {
-        "label": "🎬 The Legend of Hei (ENG)",
-        "file_id": "BQACAgUAAyEFAAThvr8XAAMVae9z3sQ3l65QsNFQaxI8ZRfQBikAAi4bAAJZXQABVeRKzDZn-DjVOwQ"
-    },
-    "hei2": {
-        "label": "🎬 The Legend of Hei 2",
-        "file_id": "BQACAgUAAyEFAAThvr8XAAMWae9z3uLu4p_GkzGMgI65tcvL7Z4AApkcAALSjdBWPYB_jbO8zDg7BA"
-    },
-    "demonslayer": {
-        "label": "⚔️ Demon Slayer — Infinity Castle",
-        "file_id": "BQACAgUAAyEFAAThvr8XAAMXae90At3iRcrujkcyFaPTdMIOPx0AArUVAAKBtJFV9YH_ATbu0JY7BA"
-    },
-    "nezha2": {
-        "label": "🐉 Ne Zha 2 (2025)",
-        "file_id": "BAACAgQAAyEFAAThvr8XAAMYae90AqK4rkwIeHq9iNx5ItyfEFwAAgosAAJ-S2FQ9D12m24upo87BA"
-    },
-    "rezearc": {
-        "label": "💥 Reze Arc",
-        "file_id": "BQACAgUAAyEFAAThvr8XAAMZae90ApJeOchui0MHMwE1dqH6SPcAArcVAAKBtJFV_tkYjPzwuIk7BA"
-    }
-}
+# File index now lives in Turso (see db.py) instead of a hardcoded dict.
+db.init_db()
 
 # ── Telegram API helpers ──────────────────────────────────────────────────────
 
@@ -124,7 +102,7 @@ def build_join_prompt(in_ch1, in_ch2):
 def build_file_list_buttons():
     """Each file gets its own button row. Tapping sends the file."""
     buttons = []
-    for key, info in FILE_INDEX.items():
+    for key, info in db.list_files().items():
         buttons.append([{
             "text": info["label"],
             "callback_data": f"get:{key}"
@@ -150,7 +128,16 @@ def webhook():
     username = message.get("from", {}).get("first_name", "there")
     text = (message.get("text") or "").strip()
 
-    if not chat_id or not text or not user_id:
+    if not chat_id or not user_id:
+        return jsonify(ok=True)
+
+    # ── Admin file-management commands (work even without a text command,
+    #    since /addfile is typically sent as a reply to a document) ──
+    if user_id == ADMIN_ID and text.lower().startswith(("/addfile", "/delfile", "/files")):
+        handle_admin_command(message, chat_id, text)
+        return jsonify(ok=True)
+
+    if not text:
         return jsonify(ok=True)
 
     text_lower = text.lower()
@@ -195,7 +182,7 @@ def webhook():
     # /get <key> — still supported as text command too
     elif text_lower.startswith("/get "):
         keyword = text[5:].strip().lower()
-        info = FILE_INDEX.get(keyword)
+        info = db.get_file(keyword)
         if not info:
             send_message(chat_id,
                 f"❌ No file found for '<code>{keyword}</code>'.\n\n"
@@ -214,6 +201,63 @@ def webhook():
 
     return jsonify(ok=True)
 
+# ── Admin: manage the file index without touching code ───────────────────────
+
+def handle_admin_command(message, chat_id, text):
+    """
+    /addfile <key> | <label>   — send as a REPLY to a document message;
+                                  the file_id is pulled from the replied-to document.
+    /delfile <key>             — remove an entry.
+    /files                     — list raw entries (key, label, file_id) for debugging.
+    """
+    text_lower = text.lower()
+
+    if text_lower.startswith("/addfile"):
+        reply = message.get("reply_to_message", {})
+        document = reply.get("document")
+        if not document:
+            send_message(chat_id,
+                "⚠️ Send <code>/addfile key | Label text</code> as a <b>reply</b> "
+                "to the document you want to register."
+            )
+            return
+
+        payload = text.split(" ", 1)[1].strip() if " " in text else ""
+        if "|" not in payload:
+            send_message(chat_id, "⚠️ Format: <code>/addfile key | Label text</code>")
+            return
+
+        key, label = (part.strip() for part in payload.split("|", 1))
+        key = key.lower()
+        if not key or not label:
+            send_message(chat_id, "⚠️ Both key and label are required.")
+            return
+
+        db.add_file(key, label, document["file_id"])
+        send_message(chat_id, f"✅ Saved <b>{key}</b> → {label}")
+
+    elif text_lower.startswith("/delfile"):
+        parts = text.split(" ", 1)
+        if len(parts) < 2 or not parts[1].strip():
+            send_message(chat_id, "⚠️ Format: <code>/delfile key</code>")
+            return
+        key = parts[1].strip().lower()
+        if db.remove_file(key):
+            send_message(chat_id, f"🗑 Removed <b>{key}</b>.")
+        else:
+            send_message(chat_id, f"❌ No entry found for '<code>{key}</code>'.")
+
+    elif text_lower.startswith("/files"):
+        files = db.list_files()
+        if not files:
+            send_message(chat_id, "No files stored yet.")
+            return
+        lines = [
+            f"• <code>{key}</code> — {info['label']}\n  <code>{info['file_id']}</code>"
+            for key, info in files.items()
+        ]
+        send_message(chat_id, "📋 <b>Stored files:</b>\n\n" + "\n\n".join(lines))
+
 # ── Callback handler ──────────────────────────────────────────────────────────
 
 def handle_callback(callback_query):
@@ -226,7 +270,7 @@ def handle_callback(callback_query):
     # File button tapped
     if data.startswith("get:"):
         key = data[4:]
-        info = FILE_INDEX.get(key)
+        info = db.get_file(key)
 
         if not info:
             answer_callback(query_id, "File not found.", show_alert=True)
